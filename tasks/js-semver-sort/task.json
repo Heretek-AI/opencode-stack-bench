@@ -1,0 +1,6 @@
+{
+  "title": "Implement SemVer comparison and range matching",
+  "runner": "node",
+  "timeout_s": 600,
+  "tests": 8
+}

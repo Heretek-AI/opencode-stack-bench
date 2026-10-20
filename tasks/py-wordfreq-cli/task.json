@@ -1,0 +1,6 @@
+{
+  "title": "Add flags to a word-frequency CLI",
+  "runner": "python",
+  "timeout_s": 600,
+  "tests": 8
+}

@@ -1,0 +1,6 @@
+{
+  "title": "Implement a duration parser",
+  "runner": "python",
+  "timeout_s": 600,
+  "tests": 8
+}

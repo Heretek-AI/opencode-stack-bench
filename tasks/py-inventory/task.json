@@ -1,0 +1,6 @@
+{
+  "title": "Fix pricing bug and add restock in a multi-module package",
+  "runner": "python",
+  "timeout_s": 600,
+  "tests": 8
+}

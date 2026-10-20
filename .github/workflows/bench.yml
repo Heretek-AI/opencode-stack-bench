@@ -1,0 +1,161 @@
+name: Benchmark stock vs stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model for BOTH arms, provider/model[#variant] (falls back to the BENCH_MODEL repo variable)"
+        required: false
+        default: ""
+      waves:
+        description: "Number of waves (each wave runs every task once per arm)"
+        required: true
+        default: "3"
+      tasks:
+        description: "Comma separated task ids, or 'all'"
+        required: true
+        default: "all"
+      opencode_version:
+        description: "npm version of @opencode/cli to install (e.g. latest, 2.1.1)"
+        required: true
+        default: "latest"
+      stack_agent:
+        description: "Optional agent name to run the stack arm with (e.g. bench-builder). Empty = opencode's default agent"
+        required: false
+        default: ""
+      timeout:
+        description: "Per-task timeout in seconds (0 = use each task's task.json)"
+        required: true
+        default: "0"
+      max_parallel:
+        description: "Max jobs running at once (lower this if you hit provider rate limits)"
+        required: true
+        default: "4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      waves: ${{ steps.plan.outputs.waves }}
+      model: ${{ steps.plan.outputs.model }}
+    steps:
+      - id: plan
+        env:
+          WAVES: ${{ inputs.waves }}
+          MODEL: ${{ inputs.model || vars.BENCH_MODEL }}
+        run: |
+          if [ -z "$MODEL" ]; then
+            echo "::error::Set the 'model' input or a BENCH_MODEL repository variable (e.g. anthropic/claude-sonnet-4-5)."
+            exit 1
+          fi
+          case "$WAVES" in (''|*[!0-9]*) echo "::error::waves must be a positive integer"; exit 1;; esac
+          if [ "$WAVES" -lt 1 ] || [ "$WAVES" -gt 20 ]; then echo "::error::waves must be between 1 and 20"; exit 1; fi
+          echo "waves=$(python3 -c "import json; print(json.dumps(list(range(1, $WAVES + 1))))")" >> "$GITHUB_OUTPUT"
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+
+  run:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      matrix:
+        wave: ${{ fromJSON(needs.plan.outputs.waves) }}
+        arm: [stock, stack]
+    name: wave ${{ matrix.wave }} / ${{ matrix.arm }}
+    env:
+      # Provider keys: add the ones you use as repository secrets. Both arms see the same keys.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      # PLACEHOLDER: secrets your MCP servers or plugins need. Reference them in
+      # arms/stack/opencode.json as {env:NAME}. Exposed to both arms; the stock arm ignores them.
+      # GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.MCP_GITHUB_TOKEN }}
+      # CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Most local MCP servers run through npx (Node, above) or uvx (uv, below).
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install opencode
+        run: |
+          npm install -g "@opencode/cli@${{ inputs.opencode_version }}"
+          opencode --version
+
+      - name: Validate stack config
+        if: matrix.arm == 'stack'
+        run: bash bench/inspect_arm.sh arms/stack
+
+      - name: Run wave
+        env:
+          MODEL: ${{ needs.plan.outputs.model }}
+          ARM: ${{ matrix.arm }}
+          WAVE: ${{ matrix.wave }}
+          TASKS: ${{ inputs.tasks }}
+          TIMEOUT: ${{ inputs.timeout }}
+          STACK_AGENT: ${{ inputs.stack_agent }}
+        run: |
+          agent=""
+          if [ "$ARM" = "stack" ] && [ -n "$STACK_AGENT" ]; then agent="$STACK_AGENT"; fi
+          python bench/run_arm.py --arm "$ARM" --wave "$WAVE" --model "$MODEL" \
+            --agent "$agent" --tasks "$TASKS" --timeout "$TIMEOUT" --out results
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.arm }}-w${{ matrix.wave }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  report:
+    needs: run
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: results-*
+          path: results
+          merge-multiple: true
+
+      - name: Compare arms
+        run: |
+          set +e
+          python bench/report.py results --out report
+          status=$?
+          cat report/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          exit $status
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report
+          path: |
+            report/
+            results/

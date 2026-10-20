@@ -1,0 +1,6 @@
+{
+  "title": "Implement an LRU cache with TTL",
+  "runner": "node",
+  "timeout_s": 600,
+  "tests": 9
+}
